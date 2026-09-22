@@ -97,7 +97,7 @@ enum HeliPort {
             delay 0.25
             repeat with mb in menu bars of process "HeliPort"
                 repeat with sbi in menu bar items of mb
-                    set r to tryMenu(sbi, targetOn)
+                    set r to my tryMenu(sbi, targetOn)
                     if r is "ok" then
                         key code 53
                         return "ok"
@@ -145,7 +145,13 @@ enum HeliPort {
                     return checkbox 1 of mi
                 end try
                 try
+                    return button 1 of mi
+                end try
+                try
                     return checkbox 1 of UI element 1 of mi
+                end try
+                try
+                    return button 1 of UI element 1 of mi
                 end try
             end repeat
             error "switch-not-found"
