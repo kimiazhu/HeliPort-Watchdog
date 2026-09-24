@@ -19,9 +19,45 @@ DOWN_THRESHOLD=10
 PING_INTERVAL=1
 OFF_DURATION=1
 
+# ---------------- 日志配色 ----------------
+# 失败类（WARN/ERROR）红色，成功/通知类（INFO）绿色。
+# 默认 auto：仅当输出为终端时上色；-no-color 或 NO_COLOR=1 强制关闭。
+
+COLOR_MODE="auto"
+C_RED=""
+C_GREEN=""
+C_RESET=""
+
+setup_colors() {
+    C_RED=""
+    C_GREEN=""
+    C_RESET=""
+    case "$COLOR_MODE" in
+        never) return 0 ;;
+        always) ;;
+        auto)
+            if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
+                return 0
+            fi
+            ;;
+    esac
+    C_RED=$(printf '\033[0;31m')
+    C_GREEN=$(printf '\033[0;32m')
+    C_RESET=$(printf '\033[0m')
+}
+
+setup_colors
+
 log() {
-    # $1=级别, 其余=内容
-    printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2"
+    # $1=级别, $2=内容
+    local color
+    case "$1" in
+        ERROR) color="$C_RED" ;;
+        WARN)  color="$C_RED" ;;
+        INFO)  color="$C_GREEN" ;;
+        *)     color="" ;;
+    esac
+    printf '%s[%s] [%s] %s%s\n' "$color" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" "$C_RESET"
 }
 
 die() {
@@ -44,7 +80,13 @@ heliport-watchdog —— HeliPort(itlwm) 网络看门狗
   -off <秒>            判定不通后 Wi-Fi 关闭多少秒再重开（默认 1）
   -probe               只做一次 ping 探测并退出（调试用）
   -set-power <on|off>  直接设置 HeliPort Wi-Fi 开关状态并退出（调试用）
+  -color <auto|always|never>
+                       日志配色方式（默认 auto：仅终端输出时上色）
+  -no-color            关闭日志配色（等价于 -color never）
   -h, --help           显示本帮助
+
+日志配色:
+  失败类日志（WARN/ERROR）显示为红色，成功/通知类（INFO）显示为绿色。
 
 注意:
   控制 HeliPort 菜单依赖辅助功能权限：首次使用需在
@@ -66,6 +108,7 @@ parse_seconds() {
 
 PROBE_ONLY=0
 SET_POWER=""
+FAIL_COUNT=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -98,6 +141,18 @@ while [ $# -gt 0 ]; do
             ;;
         -probe|--probe)
             PROBE_ONLY=1
+            shift
+            ;;
+        -color|--color)
+            [ $# -ge 2 ] || die "参数 $1 需要 auto、always 或 never"
+            case "$2" in
+                auto|always|never) COLOR_MODE="$2" ;;
+                *) die "参数 $1 需要 auto、always 或 never" ;;
+            esac
+            shift 2
+            ;;
+        -no-color|--no-color)
+            COLOR_MODE="never"
             shift
             ;;
         -set-power|--set-power)
@@ -254,6 +309,8 @@ heliport_toggle() {
     return 1
 }
 
+setup_colors
+
 # ---------------- 调试模式 ----------------
 
 if [ "$PROBE_ONLY" -eq 1 ]; then
@@ -283,20 +340,23 @@ trap 'log INFO "heliport-watchdog 退出"; exit 0' INT TERM
 
 FAILURE_START=""
 SUPPRESS_UNTIL=0
+FAIL_COUNT=0
 
 while true; do
     if ping -c 1 -W 1000 -t 2 "$REMOTE_IP" >/dev/null 2>&1; then
-        if [ -n "$FAILURE_START" ]; then
-            log INFO "网络恢复：ping $REMOTE_IP 成功"
+        if [ "$FAIL_COUNT" -gt 0 ]; then
+            log INFO "网络恢复：ping $REMOTE_IP 成功（连续失败计数 ${FAIL_COUNT} 已清零）"
         fi
         FAILURE_START=""
         SUPPRESS_UNTIL=0
+        FAIL_COUNT=0
     else
         NOW=$(date +%s)
+        FAIL_COUNT=$(( FAIL_COUNT + 1 ))
         if [ "$SUPPRESS_UNTIL" -gt 0 ] && [ "$NOW" -lt "$SUPPRESS_UNTIL" ]; then
-            log INFO "ping $REMOTE_IP 失败（修复后宽限期内，忽略）"
+            log WARN "ping $REMOTE_IP 失败（连续失败 ${FAIL_COUNT} 次，修复后宽限期内，忽略）"
         elif [ "$SUPPRESS_UNTIL" -gt 0 ]; then
-            log INFO "宽限期结束，重新开始统计连续失败时长"
+            log INFO "宽限期结束，重新开始统计连续失败时长（连续失败 ${FAIL_COUNT} 次）"
             SUPPRESS_UNTIL=0
             FAILURE_START=""
         else
@@ -304,16 +364,17 @@ while true; do
                 FAILURE_START="$NOW"
             fi
             DOWN=$(( NOW - FAILURE_START ))
-            log WARN "ping $REMOTE_IP 失败（已持续 ${DOWN}s）"
+            log WARN "ping $REMOTE_IP 失败（连续失败 ${FAIL_COUNT} 次，已持续 ${DOWN}s）"
 
             if [ "$DOWN" -ge "$DOWN_THRESHOLD" ]; then
-                log WARN "连续 ${DOWN}s ping 不通，重启 HeliPort 网络：关闭 ${OFF_DURATION}s 后重开"
+                log WARN "连续 ${DOWN}s ping 不通（连续失败 ${FAIL_COUNT} 次），重启 HeliPort 网络：关闭 ${OFF_DURATION}s 后重开"
                 if heliport_toggle; then
                     log INFO "HeliPort 网络重启完成，等待重连"
                 else
                     log ERROR "HeliPort 网络重启失败（稍后自动重试）"
                 fi
                 FAILURE_START=""
+                FAIL_COUNT=0
                 GRACE=$(( DOWN_THRESHOLD * 2 ))
                 [ "$GRACE" -lt 30 ] && GRACE=30
                 SUPPRESS_UNTIL=$(( $(date +%s) + GRACE ))
