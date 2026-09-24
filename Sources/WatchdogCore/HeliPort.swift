@@ -1,21 +1,21 @@
 import Foundation
 
-enum HeliPortError: Error, CustomStringConvertible {
+public enum HeliPortError: Error, CustomStringConvertible {
     case notRunning
     case assistiveAccess(String)
     case switchNotFound
     case scriptFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .notRunning:
             return "HeliPort 未运行，请先启动 HeliPort"
         case .assistiveAccess(let detail):
             return "缺少辅助功能权限，无法操作 HeliPort 菜单。"
                 + "请在「系统设置 → 隐私与安全性 → 辅助功能」中，"
-                + "为运行 heliport-watchdog 的终端程序（或 heliport-watchdog 本体）授权后重试。详情：\(detail)"
+                + "为 HeliPortWatchdog 授权后重试。详情：\(detail)"
         case .switchNotFound:
-            return "未能在 HeliPort 菜单中找到 Wi-Fi 开关，HeliPort 版本可能不兼容"
+            return "未能在 HeliPort 菜单中找到 Wi-Fi 开关（HeliPort 版本可能不兼容）"
         case .scriptFailed(let detail):
             return "AppleScript 执行失败：\(detail)"
         }
@@ -26,30 +26,45 @@ enum HeliPortError: Error, CustomStringConvertible {
 ///
 /// HeliPort（itlwm 驱动配套客户端）没有 CLI / URL Scheme，Wi-Fi 电源
 /// 只能经由其菜单栏菜单第一项里的 NSSwitch 切换，因此依赖辅助功能权限。
-enum HeliPort {
+public enum HeliPort {
 
-    /// 将 HeliPort 的 Wi-Fi 关闭一段时间后再打开。
-    static func toggle(offDuration: TimeInterval) throws {
-        try setPower(on: false)
+    public enum ToggleOutcome {
+        case success
+        case failed
+        /// 缺少辅助功能权限（.sh 中该情形会 exit 1；GUI 据此不退出、进入宽限期）
+        case assistiveDenied
+    }
+
+    /// 日志回调：级别 + 文案（由调用方决定落点：CLI 打印到控制台，GUI 汇入日志窗口）。
+    public typealias LogSink = (_ level: LogLevel, _ message: String) -> Void
+
+    /// 将 HeliPort 的 Wi-Fi 关闭一段时间后再打开（对齐 .sh `heliport_toggle`）。
+    /// 每次失败都按 .sh 措辞经 log 回调逐次记一行 ERROR（assistive 为两行并立即终止 toggle）。
+    public static func toggle(offDuration: TimeInterval, log: LogSink) -> ToggleOutcome {
+        do {
+            try setPower(on: false)
+        } catch {
+            return reportError(error, log: log) ? .assistiveDenied : .failed
+        }
         if offDuration > 0 {
             Thread.sleep(forTimeInterval: offDuration)
         }
         // 恢复动作必须成功，否则会把 Wi-Fi 留在关闭状态
-        var lastError: Error = HeliPortError.scriptFailed("恢复 Wi-Fi 未知失败")
         for _ in 0..<3 {
             do {
                 try setPower(on: true)
-                return
+                return .success
             } catch {
-                lastError = error
+                if reportError(error, log: log) { return .assistiveDenied }
                 Thread.sleep(forTimeInterval: 1)
             }
         }
-        throw lastError
+        log(.error, "恢复 Wi-Fi 连续 3 次失败，Wi-Fi 可能仍处于关闭状态，请手动检查 HeliPort")
+        return .failed
     }
 
     /// 设置 Wi-Fi 电源状态（幂等：若已处于目标状态则不做任何点击）。
-    static func setPower(on: Bool) throws {
+    public static func setPower(on: Bool) throws {
         let (out, err, status) = runOSAScript(arguments: ["-", on ? "1" : "0"], timeout: 30)
         let result = out.trimmingCharacters(in: .whitespacesAndNewlines)
         if status == 0 && result == "ok" { return }
@@ -66,6 +81,36 @@ enum HeliPort {
         default:
             throw HeliPortError.scriptFailed(detail)
         }
+    }
+
+    /// 按 .sh `heliport_set_power` 的措辞输出一次失败错误行。
+    /// 返回是否为辅助功能权限缺失（.sh 中该情形直接 exit 1，此处由调用方决定后续）。
+    @discardableResult
+    public static func reportError(_ error: Error, log: LogSink) -> Bool {
+        if isAssistiveDenied(error) {
+            log(.error, "缺少辅助功能权限，无法操作 HeliPort 菜单")
+            log(.error, "请在「系统设置 → 隐私与安全性 → 辅助功能」中，为 HeliPortWatchdog 授权后重试")
+            return true
+        }
+        switch error as? HeliPortError {
+        case .notRunning:
+            log(.error, "HeliPort 未运行，请先启动 HeliPort")
+        case .assistiveAccess:
+            break // 上面已处理
+        case .switchNotFound:
+            log(.error, "未能在 HeliPort 菜单中找到 Wi-Fi 开关（HeliPort 版本可能不兼容）")
+        case .scriptFailed(let detail):
+            log(.error, "AppleScript 执行失败：\(detail)")
+        case nil:
+            log(.error, "AppleScript 执行失败：\(error)")
+        }
+        return false
+    }
+
+    private static func isAssistiveDenied(_ error: Error) -> Bool {
+        guard let heliPortError = error as? HeliPortError else { return false }
+        if case .assistiveAccess = heliPortError { return true }
+        return false
     }
 
     // MARK: - AppleScript

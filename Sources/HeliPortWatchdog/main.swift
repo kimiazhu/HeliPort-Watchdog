@@ -1,4 +1,5 @@
 import Foundation
+import WatchdogCore
 
 setvbuf(stdout, nil, _IONBF, 0)
 
@@ -92,84 +93,58 @@ while index < args.count {
     index += 1
 }
 
+// MARK: - 控制台输出
+
+func emitConsole(_ level: LogLevel, _ message: String) {
+    print(LogFormatter.render(LogLine(date: Date(), level: level, message: message)))
+}
+
 // MARK: - 调试模式
 
 if probeOnly {
     let ok = Pinger.ping(host: config.remoteIP, timeoutSeconds: 2)
-    Log.info("probe \(config.remoteIP): \(ok ? "OK（畅通）" : "FAIL（不通）")")
+    emitConsole(.info, "probe \(config.remoteIP): \(ok ? "OK（畅通）" : "FAIL（不通）")")
     exit(ok ? 0 : 1)
 }
 
 if let target = setPowerTarget {
     do {
         try HeliPort.setPower(on: target)
-        Log.info("HeliPort Wi-Fi 开关已处于 \(target ? "on" : "off") 状态")
+        emitConsole(.info, "HeliPort Wi-Fi 开关已处于 \(target ? "on" : "off") 状态")
         exit(0)
     } catch {
-        Log.error("设置 HeliPort Wi-Fi 开关失败：\(error)")
+        // 与 .sh 的 heliport_set_power 错误行一致（assistive 为两行）
+        HeliPort.reportError(error, log: emitConsole)
         exit(1)
     }
 }
 
-// MARK: - 看门狗主循环
+// MARK: - 看门狗主循环（WatchdogEngine，行为对齐 .sh）
 
-Log.info("heliport-watchdog 启动：远端 IP=\(config.remoteIP)，"
-    + "判定时长=\(String(format: "%g", config.downThreshold))s，"
-    + "探测间隔=\(String(format: "%g", config.pingInterval))s，"
-    + "断网时长=\(String(format: "%g", config.offDuration))s")
-
-var failureStart: Date? = nil
-// 修复动作后的宽限期：等待 Wi-Fi 重连，期间不计失败，
-// 避免重连期间再次触发重启；宽限期在首次 ping 成功时提前结束。
-var suppressUntil: Date? = nil
-
-while true {
-    let cycleStart = Date()
-    let reachable = Pinger.ping(host: config.remoteIP, timeoutSeconds: 2)
-    let now = Date()
-
-    if reachable {
-        if failureStart != nil {
-            Log.info("网络恢复：ping \(config.remoteIP) 成功")
-        }
-        failureStart = nil
-        suppressUntil = nil
-    } else {
-        if let until = suppressUntil {
-            if now < until {
-                Log.info("ping \(config.remoteIP) 失败（修复后宽限期内，忽略）")
-            } else {
-                Log.info("宽限期结束，重新开始统计连续失败时长")
-                suppressUntil = nil
-                failureStart = nil
-            }
-        } else {
-            if failureStart == nil { failureStart = now }
-            let downSeconds = now.timeIntervalSince(failureStart!)
-            Log.warn("ping \(config.remoteIP) 失败（已持续 \(Int(downSeconds.rounded(.up)))s）")
-
-            if downSeconds >= config.downThreshold {
-                Log.warn("连续 \(String(format: "%g", downSeconds))s ping 不通，"
-                    + "重启 HeliPort 网络：关闭 \(String(format: "%g", config.offDuration))s 后重开")
-                do {
-                    try HeliPort.toggle(offDuration: config.offDuration)
-                    Log.info("HeliPort 网络重启完成，等待重连")
-                } catch let error as HeliPortError where String(describing: error).contains("辅助功能") {
-                    Log.error("\(error)")
-                    Log.error("获得权限前无法继续，退出")
-                    exit(1)
-                } catch {
-                    Log.error("HeliPort 网络重启失败：\(error)（稍后自动重试）")
-                }
-                failureStart = nil
-                suppressUntil = Date().addingTimeInterval(max(30, config.downThreshold * 2))
-            }
-        }
-    }
-
-    let elapsed = Date().timeIntervalSince(cycleStart)
-    let remaining = config.pingInterval - elapsed
-    if remaining > 0 {
-        Thread.sleep(forTimeInterval: remaining)
-    }
+let engine = WatchdogEngine(config: WatchdogEngine.Config(
+    remoteIP: config.remoteIP,
+    downThreshold: config.downThreshold,
+    pingInterval: config.pingInterval,
+    offDuration: config.offDuration
+))
+engine.onEvent = { line in
+    print(LogFormatter.render(line))
 }
+// 缺少辅助功能权限时与 .sh 一致：两行 ERROR（由 Engine/HeliPort 记录）后退出
+engine.onAssistiveDenied = { exit(1) }
+
+// 与 .sh 的 trap 一致：INT/TERM 记退出日志后以 0 退出
+var signalSources: [DispatchSourceSignal] = []
+for sig in [SIGINT, SIGTERM] {
+    signal(sig, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: DispatchQueue.main)
+    source.setEventHandler {
+        emitConsole(.info, "heliport-watchdog 退出")
+        exit(0)
+    }
+    source.resume()
+    signalSources.append(source)
+}
+
+engine.start()
+dispatchMain() // 主循环跑在引擎线程；主线程负责信号处理
