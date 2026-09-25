@@ -4,14 +4,6 @@ import WatchdogCore
 /// 组装日志窗口 + 托盘 + 引擎；Engine 事件 hop 主线程。
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
-    /// GUI 固定 .sh 默认配置（无设置界面）
-    private static let config = WatchdogEngine.Config(
-        remoteIP: "192.168.100.1",
-        downThreshold: 10,
-        pingInterval: 1,
-        offDuration: 1
-    )
-
     let engine: WatchdogEngine
     let logWindowController: LogWindowController
     let statusItemController: StatusItemController
@@ -19,10 +11,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pendingTerminate = false
 
     override init() {
-        let logController = LogWindowController()
+        // 启动时读取持久化配置（首次运行为 .sh 默认值）
+        let savedConfig = AppSettings.load()
+
+        let logController = LogWindowController(config: savedConfig)
         self.logWindowController = logController
 
-        let engine = WatchdogEngine(config: Self.config)
+        let engine = WatchdogEngine(config: savedConfig)
         self.engine = engine
 
         let statusItem = StatusItemController()
@@ -30,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         super.init()
 
+        logController.onSave = { [weak self] config in
+            self?.applyConfig(config)
+        }
         engine.onEvent = { [weak logController] line in
             DispatchQueue.main.async {
                 logController?.append(line)
@@ -95,6 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func restoreWindow() {
         logWindowController.showWindow(nil)
         AppActivation.activateApp()
+    }
+
+    // MARK: - 配置
+
+    /// 「保存配置」：更新运行中的引擎，并在日志窗口回显生效值
+    private func applyConfig(_ config: WatchdogEngine.Config) {
+        engine.updateConfig(config)
+        let fmt = { (value: TimeInterval) in String(format: "%g", value) }
+        logWindowController.append(LogLine(
+            date: Date(),
+            level: .info,
+            message: "配置已保存并生效：远端 IP=\(config.remoteIP)，"
+                + "判定时长=\(fmt(config.downThreshold))s，"
+                + "探测间隔=\(fmt(config.pingInterval))s，"
+                + "断网时长=\(fmt(config.offDuration))s"
+        ))
     }
 
     // MARK: - 退出收尾

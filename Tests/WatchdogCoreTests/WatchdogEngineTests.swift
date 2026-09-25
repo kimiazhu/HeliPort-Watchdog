@@ -290,6 +290,41 @@ struct WatchdogEngineTests {
         // 每周期无条件 sleep(1)，即使 ping 一直成功
         #expect(stopper.sleeps == [1.0, 1.0, 1.0])
     }
+
+    // MARK: updateConfig：运行期更新配置即时生效（GUI 保存配置依据）
+
+    @Test("updateConfig：新配置在后续周期生效")
+    func updateConfigAppliesToSubsequentCycles() {
+        let ping = PingStub([false, false, false])
+        let clock = ClockStub()
+        let toggle = ToggleStub()
+        let (engine, log) = makeEngine(ping: ping, toggle: toggle, clock: clock)
+
+        engine.updateConfig(WatchdogEngine.Config(
+            remoteIP: "10.0.0.254",
+            downThreshold: 2,
+            pingInterval: 1,
+            offDuration: 1
+        ))
+
+        // T=0：新 IP 首败
+        engine.cycle()
+        clock.advance(1)
+        // T=1：持续 1s < 阈值 2s，不触发
+        engine.cycle()
+        clock.advance(1)
+        #expect(toggle.callCount == 0)
+        #expect(log.message(at: 0) == "ping 10.0.0.254 失败（连续失败 1 次，已持续 0s）")
+        #expect(log.message(at: 1) == "ping 10.0.0.254 失败（连续失败 2 次，已持续 1s）")
+
+        // T=2：持续 2s ≥ 阈值 2s，触发 toggle（本周期先记失败行，再记触发行）
+        engine.cycle()
+        #expect(toggle.callCount == 1)
+        #expect(log.message(at: 2) == "ping 10.0.0.254 失败（连续失败 3 次，已持续 2s）")
+        #expect(log.level(at: 3) == .warn)
+        #expect(log.message(at: 3) == "连续 2s ping 不通（连续失败 3 次），重启 HeliPort 网络：关闭 1s 后重开")
+        #expect(engine.currentConfig.remoteIP == "10.0.0.254")
+    }
 }
 
 // MARK: - 日志格式（秒级、en_US_POSIX）

@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 import WatchdogCore
 
-/// 托盘：SF Symbol "wifi"（template）。
+/// 托盘：应用图标（包内 AppIcon.icns，非 template 原样显示）。
 /// 左键 → 还原/前置日志窗口；右键 / Ctrl+左键 → 菜单（随系统启动、退出）。
 /// NSStatusItem.button 为只读，无法替换为 NSStatusBarButton 子类，
 /// 故以 button.action + NSApp.currentEvent 分流实现同等的左/右键行为。
@@ -23,9 +23,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     override init() {
         super.init()
         guard let button = statusItem.button else { return }
-        let icon = NSImage(systemSymbolName: "wifi", accessibilityDescription: "HeliPort Watchdog")
-        icon?.isTemplate = true
-        button.image = icon
+        button.image = Self.appTrayIcon()
         button.toolTip = "HeliPort Watchdog"
         button.target = self
         button.action = #selector(handleClick(_:))
@@ -37,6 +35,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
         menu.delegate = self
+    }
+
+    // MARK: - 托盘图标
+
+    /// 应用图标（AppIcon.icns）缩放到菜单栏尺寸；非 bundle 运行（swift run）回落系统应用图标
+    private static func appTrayIcon() -> NSImage? {
+        let source: NSImage?
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
+            source = NSImage(contentsOf: url)
+        } else {
+            source = NSApp.applicationIconImage
+        }
+        guard let image = source else { return nil }
+        // copy 后改尺寸，避免污染 NSApp.applicationIconImage 等共享实例
+        let sized = image.copy() as! NSImage
+        let side = max(16, NSStatusBar.system.thickness - 4)
+        sized.size = NSSize(width: side, height: side)
+        sized.isTemplate = false
+        return sized
     }
 
     // MARK: - 左/右键分流

@@ -5,7 +5,9 @@ import Foundation
 /// - ping / toggle / 时钟 / 睡眠均可注入，便于单元测试；
 /// - 主循环在后台线程执行（`start()`），CLI 也可直接 `run()` 阻塞主线程；
 /// - 所有日志经 `onEvent: (LogLine) -> Void` 回调，由调用方决定落点
-///   （CLI 打印到控制台，GUI 跳主线程汇入日志窗口）。
+///   （CLI 打印到控制台，GUI 跳主线程汇入日志窗口）；
+/// - 配置可运行期经 `updateConfig` 更新（GUI 保存设置），每个周期取快照，
+///   不打断进行中的 toggle。
 public final class WatchdogEngine {
 
     public struct Config {
@@ -39,7 +41,8 @@ public final class WatchdogEngine {
     /// 每次 toggle（无论成败）完成后在引擎线程回调。GUI 用于延迟退出。
     public var onToggleDidFinish: (() -> Void)?
 
-    private let config: Config
+    /// 当前配置；可运行期经 updateConfig 更新，读写均由 lock 保护
+    private var config: Config
     private let ping: PingFn?
     private let toggle: ToggleFn?
     private let clock: ClockFn
@@ -90,19 +93,34 @@ public final class WatchdogEngine {
         return toggling
     }
 
+    /// 当前配置快照（跨线程可读）。
+    public var currentConfig: Config {
+        lock.lock()
+        defer { lock.unlock() }
+        return config
+    }
+
+    /// 运行期更新配置（GUI「保存配置」后调用）：下一周期生效，不影响进行中的 toggle。
+    public func updateConfig(_ newConfig: Config) {
+        lock.lock()
+        config = newConfig
+        lock.unlock()
+    }
+
     /// 阻塞式主循环。CLI 直接在主线程调用；GUI 经 `start()` 在后台线程调用。
     public func run() {
-        emit(.info, "heliport-watchdog 启动：远端 IP=\(config.remoteIP)，"
-            + "判定时长=\(fmt(config.downThreshold))s，"
-            + "探测间隔=\(fmt(config.pingInterval))s，"
-            + "断网时长=\(fmt(config.offDuration))s")
+        let cfg = currentConfig
+        emit(.info, "heliport-watchdog 启动：远端 IP=\(cfg.remoteIP)，"
+            + "判定时长=\(fmt(cfg.downThreshold))s，"
+            + "探测间隔=\(fmt(cfg.pingInterval))s，"
+            + "断网时长=\(fmt(cfg.offDuration))s")
         lock.lock()
         running = true
         lock.unlock()
         while isRunning() {
             cycle()
-            // 对齐 .sh：每周期无条件 sleep(interval)，不减去 ping 耗时
-            sleep(config.pingInterval)
+            // 对齐 .sh：每周期无条件 sleep(interval)，不减去 ping 耗时（间隔变化下周期生效）
+            sleep(currentConfig.pingInterval)
         }
     }
 
@@ -110,21 +128,22 @@ public final class WatchdogEngine {
 
     /// 主循环单次迭代（ping + 状态机判定 + 动作；不含 sleep），供单元测试直接驱动。
     func cycle() {
+        let cfg = currentConfig
         let sink: HeliPort.LogSink = { [weak self] level, message in
             self?.emit(level, message)
         }
 
         let reachable: Bool
         if let ping = ping {
-            reachable = ping(config.remoteIP)
+            reachable = ping(cfg.remoteIP)
         } else {
-            reachable = Pinger.ping(host: config.remoteIP, timeoutSeconds: 2) { sink(.error, $0) }
+            reachable = Pinger.ping(host: cfg.remoteIP, timeoutSeconds: 2) { sink(.error, $0) }
         }
         let now = clock()
 
         if reachable {
             if failCount > 0 {
-                emit(.info, "网络恢复：ping \(config.remoteIP) 成功（连续失败计数 \(failCount) 已清零）")
+                emit(.info, "网络恢复：ping \(cfg.remoteIP) 成功（连续失败计数 \(failCount) 已清零）")
             }
             // 成功即清空全部失败状态，并提前结束宽限期
             failureStart = nil
@@ -138,7 +157,7 @@ public final class WatchdogEngine {
 
         if let until = suppressUntil {
             if now < until {
-                emit(.warn, "ping \(config.remoteIP) 失败（连续失败 \(failCount) 次，修复后宽限期内，忽略）")
+                emit(.warn, "ping \(cfg.remoteIP) 失败（连续失败 \(failCount) 次，修复后宽限期内，忽略）")
             } else {
                 emit(.info, "宽限期结束，重新开始统计连续失败时长（连续失败 \(failCount) 次）")
                 // 时长重新统计，计数不清零；本次 ping 不再走失败分支
@@ -151,12 +170,12 @@ public final class WatchdogEngine {
         if failureStart == nil { failureStart = now }
         let down = now.timeIntervalSince(failureStart!)
         let downSeconds = Int(down)
-        emit(.warn, "ping \(config.remoteIP) 失败（连续失败 \(failCount) 次，已持续 \(downSeconds)s）")
+        emit(.warn, "ping \(cfg.remoteIP) 失败（连续失败 \(failCount) 次，已持续 \(downSeconds)s）")
 
-        guard down >= config.downThreshold else { return }
+        guard down >= cfg.downThreshold else { return }
 
         emit(.warn, "连续 \(downSeconds)s ping 不通（连续失败 \(failCount) 次），"
-            + "重启 HeliPort 网络：关闭 \(fmt(config.offDuration))s 后重开")
+            + "重启 HeliPort 网络：关闭 \(fmt(cfg.offDuration))s 后重开")
 
         lock.lock()
         toggling = true
@@ -182,7 +201,7 @@ public final class WatchdogEngine {
 
         failureStart = nil
         failCount = 0
-        suppressUntil = clock().addingTimeInterval(max(30, config.downThreshold * 2))
+        suppressUntil = clock().addingTimeInterval(max(30, cfg.downThreshold * 2))
 
         if case .assistiveDenied = outcome {
             onAssistiveDenied?()
