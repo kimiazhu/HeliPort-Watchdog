@@ -10,6 +10,7 @@ struct Config {
     var downThreshold: TimeInterval = 10
     var pingInterval: TimeInterval = 1
     var offDuration: TimeInterval = 1
+    var startDelay: TimeInterval = 0
 }
 
 let usage = """
@@ -27,6 +28,8 @@ Wi-Fi 关闭指定时长后再打开（经由 HeliPort 菜单栏图标的 Wi-Fi 
   -down <秒>           连续 ping 失败多少秒判定网络不通（默认 10）
   -interval <秒>       ping 探测间隔（默认 1）
   -off <秒>            判定不通后 Wi-Fi 关闭多少秒再重开（默认 1）
+  -delay <秒>          启动后延迟多少秒再开始探测（0 = 不延迟，默认 0；
+                       开机自启时可先等 HeliPort 就绪，避免初期持续失败误触发重启）
   -probe               只做一次 ping 探测并退出（调试用）
   -set-power <on|off>  直接设置 HeliPort Wi-Fi 开关状态并退出（调试用）
   -h, --help           显示本帮助
@@ -46,6 +49,14 @@ func parseSeconds(_ raw: String) -> TimeInterval? {
     var text = raw.lowercased()
     if text.hasSuffix("s") { text.removeLast() }
     guard let value = Double(text), value > 0, value < 86400 else { return nil }
+    return value
+}
+
+/// 与 parseSeconds 一致，但允许 0（-delay 的 0 表示不延迟）
+func parseSecondsAllowZero(_ raw: String) -> TimeInterval? {
+    var text = raw.lowercased()
+    if text.hasSuffix("s") { text.removeLast() }
+    guard let value = Double(text), value >= 0, value < 86400 else { return nil }
     return value
 }
 
@@ -77,6 +88,10 @@ while index < args.count {
         index += 1
         guard index < args.count, let value = parseSeconds(args[index]) else { fail("参数 \(arg) 需要正数秒，如 1") }
         config.offDuration = value
+    case "-delay", "--delay":
+        index += 1
+        guard index < args.count, let value = parseSecondsAllowZero(args[index]) else { fail("参数 \(arg) 需要非负数秒（0 表示不延迟），如 60") }
+        config.startDelay = value
     case "-probe", "--probe":
         probeOnly = true
     case "-set-power", "--set-power":
@@ -125,7 +140,8 @@ let engine = WatchdogEngine(config: WatchdogEngine.Config(
     remoteIP: config.remoteIP,
     downThreshold: config.downThreshold,
     pingInterval: config.pingInterval,
-    offDuration: config.offDuration
+    offDuration: config.offDuration,
+    startDelay: config.startDelay
 ))
 engine.onEvent = { line in
     print(LogFormatter.render(line))

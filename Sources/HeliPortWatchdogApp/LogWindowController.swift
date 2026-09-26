@@ -18,6 +18,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
     private var downField: NSTextField!
     private var intervalField: NSTextField!
     private var offField: NSTextField!
+    private var delayField: NSTextField!
     private var hintLabel: NSTextField!
     private var hintClearWork: DispatchWorkItem?
 
@@ -70,15 +71,18 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         downField = makeField(placeholder: "10")
         intervalField = makeField(placeholder: "1")
         offField = makeField(placeholder: "1")
+        delayField = makeField(placeholder: "0")
         ipField.stringValue = config.remoteIP
         downField.stringValue = formatSeconds(config.downThreshold)
         intervalField.stringValue = formatSeconds(config.pingInterval)
         offField.stringValue = formatSeconds(config.offDuration)
+        delayField.stringValue = formatSeconds(config.startDelay)
 
         grid.addRow(with: [makeLabel("目标地址"), ipField])
         grid.addRow(with: [makeLabel("判断为网络不通时长（秒）"), downField])
         grid.addRow(with: [makeLabel("PING 间隔（秒）"), intervalField])
         grid.addRow(with: [makeLabel("网络不通后关闭 WiFi 时长（秒）"), offField])
+        grid.addRow(with: [makeLabel("启动延迟探测（秒，0 不延迟）"), delayField])
 
         let saveButton = NSButton(title: "保存配置", target: self, action: #selector(saveConfig(_:)))
         saveButton.bezelStyle = .rounded
@@ -193,12 +197,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         guard let off = parseSeconds(offField, lowerBound: 1, upperBound: 3_600) else {
             return showHint("保存失败：「网络不通后关闭 WiFi 时长」需为 1–3600 的整数秒", error: true)
         }
+        guard let delay = parseSeconds(delayField, lowerBound: 0, upperBound: 86_400) else {
+            return showHint("保存失败：「启动延迟探测」需为 0–86400 的整数秒（0 表示不延迟）", error: true)
+        }
 
         let config = WatchdogEngine.Config(
             remoteIP: ip,
             downThreshold: TimeInterval(down),
             pingInterval: TimeInterval(interval),
-            offDuration: TimeInterval(off)
+            offDuration: TimeInterval(off),
+            startDelay: TimeInterval(delay)
         )
         AppSettings.save(config)
         showHint("配置已保存，下次启动自动加载", error: false)

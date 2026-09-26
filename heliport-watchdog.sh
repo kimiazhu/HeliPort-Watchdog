@@ -18,6 +18,7 @@ REMOTE_IP="192.168.100.1"
 DOWN_THRESHOLD=10
 PING_INTERVAL=1
 OFF_DURATION=1
+START_DELAY=0
 
 # ---------------- 日志配色 ----------------
 # 失败类（WARN/ERROR）红色，成功/通知类（INFO）绿色。
@@ -78,6 +79,8 @@ heliport-watchdog —— HeliPort(itlwm) 网络看门狗
   -down <秒>           连续 ping 失败多少秒判定网络不通（默认 10）
   -interval <秒>       ping 探测间隔（默认 1）
   -off <秒>            判定不通后 Wi-Fi 关闭多少秒再重开（默认 1）
+  -delay <秒>          启动后延迟多少秒再开始探测（0 = 不延迟，默认 0；
+                       开机自启时可先等 HeliPort 就绪，避免初期持续失败误触发重启）
   -probe               只做一次 ping 探测并退出（调试用）
   -set-power <on|off>  直接设置 HeliPort Wi-Fi 开关状态并退出（调试用）
   -color <auto|always|never>
@@ -137,6 +140,17 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "参数 $1 需要正整数秒，如 1"
             parse_seconds "$2" || die "参数 $1 需要正整数秒，如 1"
             OFF_DURATION="${2%s}"
+            shift 2
+            ;;
+        -delay|--delay)
+            # 与 parse_seconds 一致但允许 0（0 表示不延迟）
+            [ $# -ge 2 ] || die "参数 $1 需要非负整数秒（0 表示不延迟），如 60"
+            v="${2%s}"
+            case "$v" in
+                ''|*[!0-9]*) die "参数 $1 需要非负整数秒（0 表示不延迟），如 60" ;;
+            esac
+            [ "$v" -lt 86400 ] || die "参数 $1 需要小于 86400 的整数秒"
+            START_DELAY="$v"
             shift 2
             ;;
         -probe|--probe)
@@ -334,9 +348,15 @@ fi
 
 # ---------------- 看门狗主循环 ----------------
 
-log INFO "heliport-watchdog 启动：远端 IP=${REMOTE_IP}，判定时长=${DOWN_THRESHOLD}s，探测间隔=${PING_INTERVAL}s，断网时长=${OFF_DURATION}s"
+log INFO "heliport-watchdog 启动：远端 IP=${REMOTE_IP}，判定时长=${DOWN_THRESHOLD}s，探测间隔=${PING_INTERVAL}s，断网时长=${OFF_DURATION}s，启动延迟=${START_DELAY}s"
 
 trap 'log INFO "heliport-watchdog 退出"; exit 0' INT TERM
+
+if [ "$START_DELAY" -gt 0 ]; then
+    log INFO "启动延迟探测：等待 ${START_DELAY}s 后开始（等待 HeliPort 就绪）"
+    sleep "$START_DELAY"
+    log INFO "启动延迟结束，开始探测"
+fi
 
 FAILURE_START=""
 SUPPRESS_UNTIL=0

@@ -286,9 +286,81 @@ struct WatchdogEngineTests {
 
         #expect(log.count == 1)
         #expect(log.level(at: 0) == .info)
-        #expect(log.message(at: 0) == "heliport-watchdog 启动：远端 IP=192.168.100.1，判定时长=10s，探测间隔=1s，断网时长=1s")
+        #expect(log.message(at: 0) == "heliport-watchdog 启动：远端 IP=192.168.100.1，判定时长=10s，探测间隔=1s，断网时长=1s，启动延迟=0s")
         // 每周期无条件 sleep(1)，即使 ping 一直成功
         #expect(stopper.sleeps == [1.0, 1.0, 1.0])
+    }
+
+    // MARK: run()：启动延迟期间不探测，延迟结束才开始主循环
+
+    @Test("run()：启动延迟期间不探测，延迟结束才开始")
+    func runWaitsStartupDelayBeforeProbing() {
+        final class Stopper {
+            weak var engine: WatchdogEngine?
+            var sleeps: [Double] = []
+            var pingCount = 0
+            func sleep(_ interval: Double) {
+                sleeps.append(interval)
+                if sleeps.count >= 4 { engine?.stop() } // 延迟 3 次 sleep + 首个周期 sleep 后停止
+            }
+        }
+        let stopper = Stopper()
+        let clock = ClockStub()
+        let log = LogRecorder()
+        let engine = WatchdogEngine(
+            config: WatchdogEngine.Config(startDelay: 3),
+            ping: { _ in stopper.pingCount += 1; return true },
+            toggle: { _ in .success },
+            clock: { clock.date() },
+            sleep: { stopper.sleep($0) }
+        )
+        stopper.engine = engine
+        engine.onEvent = { log.append($0) }
+
+        engine.run() // 阻塞直至 stop
+
+        // 延迟按 ≤1s 步进等待，期间不 ping；之后才进入主循环
+        #expect(stopper.sleeps == [1.0, 1.0, 1.0, 1.0])
+        #expect(stopper.pingCount == 1)
+        #expect(log.count == 3)
+        #expect(log.level(at: 0) == .info)
+        #expect(log.message(at: 0) == "heliport-watchdog 启动：远端 IP=192.168.100.1，判定时长=10s，探测间隔=1s，断网时长=1s，启动延迟=3s")
+        #expect(log.message(at: 1) == "启动延迟探测：等待 3s 后开始（等待 HeliPort 就绪）")
+        #expect(log.message(at: 2) == "启动延迟结束，开始探测")
+    }
+
+    // MARK: run()：启动延迟期间 stop() 立即退出且不探测
+
+    @Test("run()：启动延迟期间 stop 立即退出且不探测")
+    func runStopDuringStartupDelayExitsWithoutProbing() {
+        final class Stopper {
+            weak var engine: WatchdogEngine?
+            var sleeps: [Double] = []
+            var pingCount = 0
+            func sleep(_ interval: Double) {
+                sleeps.append(interval)
+                engine?.stop()
+            }
+        }
+        let stopper = Stopper()
+        let clock = ClockStub()
+        let log = LogRecorder()
+        let engine = WatchdogEngine(
+            config: WatchdogEngine.Config(startDelay: 60),
+            ping: { _ in stopper.pingCount += 1; return true },
+            toggle: { _ in .success },
+            clock: { clock.date() },
+            sleep: { stopper.sleep($0) }
+        )
+        stopper.engine = engine
+        engine.onEvent = { log.append($0) }
+
+        engine.run() // 首次步进 sleep 即 stop，等待中断退出
+
+        #expect(stopper.sleeps == [1.0])
+        #expect(stopper.pingCount == 0, "延迟期间被 stop 不应执行任何探测")
+        #expect(log.count == 2, "只保留启动行与延迟等待行，无「延迟结束」行")
+        #expect(log.message(at: 1) == "启动延迟探测：等待 60s 后开始（等待 HeliPort 就绪）")
     }
 
     // MARK: updateConfig：运行期更新配置即时生效（GUI 保存配置依据）

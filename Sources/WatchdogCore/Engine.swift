@@ -15,16 +15,22 @@ public final class WatchdogEngine {
         public var downThreshold: TimeInterval
         public var pingInterval: TimeInterval
         public var offDuration: TimeInterval
+        /// 启动后延迟多少秒再开始探测（0 = 不延迟）。
+        /// 用于开机自启场景：等 HeliPort 就绪后再探测，避免启动初期的持续失败误触发重启。
+        /// 仅在 run() 开始时生效一次，运行期修改不追溯。
+        public var startDelay: TimeInterval
 
-        /// 默认值与 .sh 保持一致：IP=192.168.100.1，down=10s，interval=1s，off=1s
+        /// 默认值与 .sh 保持一致：IP=192.168.100.1，down=10s，interval=1s，off=1s，delay=0s
         public init(remoteIP: String = "192.168.100.1",
                     downThreshold: TimeInterval = 10,
                     pingInterval: TimeInterval = 1,
-                    offDuration: TimeInterval = 1) {
+                    offDuration: TimeInterval = 1,
+                    startDelay: TimeInterval = 0) {
             self.remoteIP = remoteIP
             self.downThreshold = downThreshold
             self.pingInterval = pingInterval
             self.offDuration = offDuration
+            self.startDelay = startDelay
         }
     }
 
@@ -109,18 +115,39 @@ public final class WatchdogEngine {
 
     /// 阻塞式主循环。CLI 直接在主线程调用；GUI 经 `start()` 在后台线程调用。
     public func run() {
+        // 先置 running，保证延迟等待期间 stop() 也能生效
+        lock.lock()
+        running = true
+        lock.unlock()
+
         let cfg = currentConfig
         emit(.info, "heliport-watchdog 启动：远端 IP=\(cfg.remoteIP)，"
             + "判定时长=\(fmt(cfg.downThreshold))s，"
             + "探测间隔=\(fmt(cfg.pingInterval))s，"
-            + "断网时长=\(fmt(cfg.offDuration))s")
-        lock.lock()
-        running = true
-        lock.unlock()
+            + "断网时长=\(fmt(cfg.offDuration))s，"
+            + "启动延迟=\(fmt(cfg.startDelay))s")
+
+        if cfg.startDelay > 0 {
+            emit(.info, "启动延迟探测：等待 \(fmt(cfg.startDelay))s 后开始（等待 HeliPort 就绪）")
+            waitStartupDelay(cfg.startDelay)
+            guard isRunning() else { return }
+            emit(.info, "启动延迟结束，开始探测")
+        }
+
         while isRunning() {
             cycle()
             // 对齐 .sh：每周期无条件 sleep(interval)，不减去 ping 耗时（间隔变化下周期生效）
             sleep(currentConfig.pingInterval)
+        }
+    }
+
+    /// 启动延迟等待：按 ≤1s 步进休眠，期间 stop() 最多 1s 内中断等待退出
+    private func waitStartupDelay(_ seconds: TimeInterval) {
+        var waited: TimeInterval = 0
+        while isRunning() && waited < seconds {
+            let step = min(1, seconds - waited)
+            sleep(step)
+            waited += step
         }
     }
 

@@ -107,7 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             message: "配置已保存并生效：远端 IP=\(config.remoteIP)，"
                 + "判定时长=\(fmt(config.downThreshold))s，"
                 + "探测间隔=\(fmt(config.pingInterval))s，"
-                + "断网时长=\(fmt(config.offDuration))s"
+                + "断网时长=\(fmt(config.offDuration))s，"
+                + "启动延迟=\(fmt(config.startDelay))s"
+                + (config.startDelay > 0 ? "（启动延迟在下一次启动应用时生效）" : "")
         ))
     }
 

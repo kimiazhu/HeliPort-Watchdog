@@ -12,6 +12,8 @@ enum AppSettings {
         var downThreshold: TimeInterval
         var pingInterval: TimeInterval
         var offDuration: TimeInterval
+        /// 可选：旧存档缺少该字段时仍可整体解码，回落默认值
+        var startDelay: TimeInterval?
     }
 
     static func load() -> WatchdogEngine.Config {
@@ -24,7 +26,8 @@ enum AppSettings {
             remoteIP: payload.remoteIP.isEmpty ? defaults.remoteIP : payload.remoteIP,
             downThreshold: max(1, payload.downThreshold),
             pingInterval: max(1, payload.pingInterval),
-            offDuration: max(1, payload.offDuration)
+            offDuration: max(1, payload.offDuration),
+            startDelay: max(0, payload.startDelay ?? defaults.startDelay)
         )
     }
 
@@ -33,7 +36,8 @@ enum AppSettings {
             remoteIP: config.remoteIP,
             downThreshold: config.downThreshold,
             pingInterval: config.pingInterval,
-            offDuration: config.offDuration
+            offDuration: config.offDuration,
+            startDelay: config.startDelay
         )
         guard let data = try? JSONEncoder().encode(payload) else { return }
         UserDefaults.standard.set(data, forKey: key)
