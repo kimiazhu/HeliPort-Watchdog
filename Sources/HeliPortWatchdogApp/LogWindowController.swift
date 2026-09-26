@@ -286,8 +286,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func scrollToBottom() {
-        guard let text = textView else { return }
-        text.scrollRangeToVisible(NSRange(location: (text.string as NSString).length, length: 0))
+        guard let scroll = scrollView, let text = textView else { return }
+        // 不能用 scrollRangeToVisible/scrollToEndOfDocument：目标矩形紧贴可见区下缘时
+        // （贴底逐行追加的常态）二者不会产生滚动，跟随一拍即断。
+        // 直接把 clip 定位到文档底部（NSTextView 为 flipped 坐标，底部即 maxY）；
+        // 纯几何操作，窗口隐藏 / 从未显示期间同样生效，重新弹出即停在最新日志。
+        text.layoutManager?.ensureLayout(for: text.textContainer!)
+        let clip = scroll.contentView
+        clip.scroll(to: NSPoint(x: 0, y: max(0, text.bounds.height - clip.bounds.height)))
+        scroll.reflectScrolledClipView(clip)
     }
 
     /// 环形保留最近 ~5000 行；仅当视图贴底时重建文本，避免打断用户上滚阅读
